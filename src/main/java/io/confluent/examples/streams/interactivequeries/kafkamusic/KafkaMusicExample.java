@@ -304,13 +304,18 @@ public class KafkaMusicExample {
         Consumed.with(Serdes.String(), playEventSerde));
 
     // get table and create a state store to hold all the songs in the store
+    // state store --> /topics/kafka-music-charts-all-songs-changelog
+    // changelog topics use cleanup.policy = compaction
     final KTable<Long, Song>
         songTable =
         builder.table(SONG_FEED, Materialized.<Long, Song, KeyValueStore<Bytes, byte[]>>as(ALL_SONGS)
-            .withKeySerde(Serdes.Long())
+            .withKeySerde(Serdes.Long()) // See KafakMusicExampleDriver, which specifies key as song id (long). NB: Control Center is unable to display long keys, but if you export them as JSON the keys are present.
             .withValueSerde(valueSongSerde));
 
     // Accept play events that have a duration >= the minimum
+    // stream repartition --> /topics/kafka-music-charts-KSTREAM-MAP-0000000004-repartition
+    // repartition topics use cleanup.policy = delete, but with retention time/size of -1 (forever, never too big)
+    // https://docs.confluent.io/platform/current/installation/configuration/topic-configs.html#cleanup.policy
     final KStream<Long, PlayEvent> playsBySongId =
         playEvents.filter((region, event) -> event.getDuration() >= MIN_CHARTABLE_DURATION)
             // repartition based on song id
@@ -323,6 +328,8 @@ public class KafkaMusicExample {
         Joined.with(Serdes.Long(), playEventSerde, valueSongSerde));
 
     // create a state store to track song play counts
+    // group by ? --> /topics/kafka-music-charts-song-play-count-repartition
+    // state store --> /topics/kafka-music-charts-song-play-count-changelog
     final KTable<Song, Long> songPlayCounts = songPlays.groupBy((songId, song) -> song,
                                                                 Grouped.with(keySongSerde, valueSongSerde))
             .count(Materialized.<Song, Long, KeyValueStore<Bytes, byte[]>>as(SONG_PLAY_COUNT_STORE)
@@ -335,6 +342,8 @@ public class KafkaMusicExample {
     // Compute the top five charts for each genre. The results of this computation will continuously update the state
     // store "top-five-songs-by-genre", and this state store can then be queried interactively via a REST API (cf.
     // MusicPlaysRestService) for the latest charts per genre.
+    // state store --> /topics/kafka-music-charts-top-five-songs-by-genre-changelog
+    // group by ? --> /topics/kafka-music-charts-top-five-songs-by-genre-repartition
     songPlayCounts.groupBy((song, plays) ->
             KeyValue.pair(song.getGenre().toLowerCase(),
                 new SongPlayCount(song.getId(), plays)),
@@ -359,6 +368,9 @@ public class KafkaMusicExample {
     // Compute the top five chart. The results of this computation will continuously update the state
     // store "top-five-songs", and this state store can then be queried interactively via a REST API (cf.
     // MusicPlaysRestService) for the latest charts per genre.
+    // ^ the above comment is incorrect; this state store can be queried via REST API for the overall top 5
+    // state store --> /topics/kafka-music-charts-top-five-songs-changelog
+    // group by ? --> /topics/kafka-music-charts-top-five-songs-repartition
     songPlayCounts.groupBy((song, plays) ->
             KeyValue.pair(TOP_FIVE_KEY,
                 new SongPlayCount(song.getId(), plays)),
